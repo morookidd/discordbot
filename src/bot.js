@@ -1,6 +1,7 @@
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js');
 const { Client, GatewayIntentBits } = require('discord.js');
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
+const { setupMyDiscordId } = require('./commands/mydiscordid');
 
 const dotenv = require('dotenv');
 
@@ -13,10 +14,7 @@ const token = process.env.DISCORD_TOKEN;
 // In-memory storage for team data per user
 const userTeams = {};
 
-// Store the message ID for each user's player list message
-const userPlayerListMessages = {};
-// Store the message ID for each user's status message
-const userPlayerStatusMessages = {};
+setupMyDiscordId(client);
 
 client.on('messageCreate', async (message) => {
     // Ignore bot messages
@@ -32,7 +30,7 @@ client.on('messageCreate', async (message) => {
 });
 
 // New code for registration system
-client.on('ready', () => {
+client.on('ready', async () => {
     // Find the registration channel
     const registerChannel = client.channels.cache.find(
         channel => channel.name === 'register'
@@ -43,18 +41,30 @@ client.on('ready', () => {
         return;
     }
 
-    // Send the registration message (only do this once!)
-    registerChannel.send({
-        content: 'Click the button below to register a new team:',
-        components: [
-            new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setCustomId('create_team')
-                    .setLabel('Create Team')
-                    .setStyle(ButtonStyle.Primary)
-            )
-        ]
-    });
+    // Check if the "Create Team" button message already exists
+    const messages = await registerChannel.messages.fetch({ limit: 20 });
+    const alreadyExists = messages.some(msg =>
+        msg.author.id === client.user.id &&
+        msg.components.length > 0 &&
+        msg.components[0].components.some(
+            btn => btn.customId === 'create_team'
+        )
+    );
+
+    if (!alreadyExists) {
+        // Send the registration message (only do this once!)
+        registerChannel.send({
+            content: 'Click the button below to register a new team:',
+            components: [
+                new ActionRowBuilder().addComponents(
+                    new ButtonBuilder()
+                        .setCustomId('create_team')
+                        .setLabel('Create Team')
+                        .setStyle(ButtonStyle.Primary)
+                )
+            ]
+        });
+    }
 });
 
 client.once('ready', async () => {
@@ -88,12 +98,12 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.customId === 'add_players') {
         const team = userTeams[interaction.user.id];
         if (!team) {
-            await interaction.reply({ content: 'You need to create a team first!', ephemeral: true });
+            await interaction.reply({ content: 'You need to create a team first!', flags: 1 << 6 });
             return;
         }
         const playerCount = (team.players && team.players.length) || 0;
         if (playerCount >= 6) {
-            await interaction.reply({ content: 'You already have 6 players in your team.', ephemeral: true });
+            await interaction.reply({ content: 'You already have 6 players in your team.', flags: 1 << 6 });
             return;
         }
 
@@ -135,7 +145,7 @@ client.on('interactionCreate', async (interaction) => {
         const playerIndex = parseInt(interaction.customId.split('_')[2], 10);
         const team = userTeams[interaction.user.id];
         if (!team || !team.players || !team.players[playerIndex]) {
-            await interaction.reply({ content: 'Player not found.', ephemeral: true });
+            await interaction.reply({ content: 'Player not found.', flags: 1 << 6 });
             return;
         }
         const player = team.players[playerIndex];
@@ -181,41 +191,14 @@ client.on('interactionCreate', async (interaction) => {
         const playerIndex = parseInt(interaction.customId.split('_')[2], 10);
         const team = userTeams[interaction.user.id];
         if (!team || !team.players || !team.players[playerIndex]) {
-            await interaction.reply({ content: 'Player not found.', ephemeral: true });
+            await interaction.reply({ content: 'Player not found.', flags: 1 << 6 });
             return;
         }
         team.players.splice(playerIndex, 1);
 
-        // Update the "Add Players" button (enable if less than 6 players)
-        const registerChannel = interaction.guild.channels.cache.find(
-            channel => channel.name === 'register'
-        );
-        if (registerChannel) {
-            const messages = await registerChannel.messages.fetch({ limit: 10 });
-            const botMsg = messages.find(m => m.author.id === client.user.id && m.components.length > 0);
-            if (botMsg) {
-                await botMsg.edit({
-                    content: 'Click the button below to edit your team or add players:',
-                    components: [
-                        new ActionRowBuilder().addComponents(
-                            new ButtonBuilder()
-                                .setCustomId('edit_team')
-                                .setLabel('Edit Team')
-                                .setStyle(ButtonStyle.Primary),
-                            new ButtonBuilder()
-                                .setCustomId('add_players')
-                                .setLabel('Add Players')
-                                .setStyle(ButtonStyle.Secondary)
-                                .setDisabled(team.players.length >= 6)
-                        )
-                    ]
-                });
-            }
-        }
-
         // Update or send the player list message and status message
         await updatePlayerListMessage(interaction, team, 'Player removed.');
-        await interaction.deferUpdate();
+        await sendEditAndAddButtons(interaction, team);
         return;
     }
 
@@ -268,6 +251,27 @@ client.on('interactionCreate', async (interaction) => {
     }
 });
 
+// Helper to send the edit/add buttons ephemerally to the user
+async function sendEditAndAddButtons(interaction, team) {
+    await interaction.followUp({
+        content: 'Use the buttons below to edit your team or add players:',
+        components: [
+            new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('edit_team')
+                    .setLabel('Edit Team')
+                    .setStyle(ButtonStyle.Primary),
+                new ButtonBuilder()
+                    .setCustomId('add_players')
+                    .setLabel('Add Players')
+                    .setStyle(ButtonStyle.Secondary)
+                    .setDisabled(team.players.length >= 6)
+            )
+        ],
+        flags: 1 << 6 // Ephemeral
+    });
+}
+
 // Handle modal submissions
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isModalSubmit()) return;
@@ -282,36 +286,10 @@ client.on('interactionCreate', async (interaction) => {
         // Save the team data for the user
         userTeams[interaction.user.id] = { teamName, teamTag, contactEmail, discordId, players: userTeams[interaction.user.id]?.players || [] };
 
-        // Update the button to "Edit Team" and add "Add Players" button
-        const registerChannel = interaction.guild.channels.cache.find(
-            channel => channel.name === 'register'
-        );
-        if (registerChannel) {
-            const messages = await registerChannel.messages.fetch({ limit: 10 });
-            const botMsg = messages.find(m => m.author.id === client.user.id && m.components.length > 0);
-            if (botMsg) {
-                await botMsg.edit({
-                    content: 'Click the button below to edit your team or add players:',
-                    components: [
-                        new ActionRowBuilder().addComponents(
-                            new ButtonBuilder()
-                                .setCustomId('edit_team')
-                                .setLabel('Edit Team')
-                                .setStyle(ButtonStyle.Primary),
-                            new ButtonBuilder()
-                                .setCustomId('add_players')
-                                .setLabel('Add Players')
-                                .setStyle(ButtonStyle.Secondary)
-                                .setDisabled(userTeams[interaction.user.id].players.length >= 6)
-                        )
-                    ]
-                });
-            }
-        }
-
         // Update or send the player list message and status message
         await updatePlayerListMessage(interaction, userTeams[interaction.user.id], 'Team updated!');
-        await interaction.deferUpdate();
+        // Send the edit/add buttons ephemerally
+        await sendEditAndAddButtons(interaction, userTeams[interaction.user.id]);
         return;
     }
 
@@ -328,7 +306,8 @@ client.on('interactionCreate', async (interaction) => {
         // Update or send the player list message and status message
         const team = userTeams[interaction.user.id];
         await updatePlayerListMessage(interaction, team, 'Player added!');
-        await interaction.deferUpdate();
+        // Send the edit/add buttons ephemerally
+        await sendEditAndAddButtons(interaction, team);
         return;
     }
 
@@ -337,7 +316,7 @@ client.on('interactionCreate', async (interaction) => {
         const playerIndex = parseInt(interaction.customId.split('_')[1], 10);
         const team = userTeams[interaction.user.id];
         if (!team || !team.players || !team.players[playerIndex]) {
-            await interaction.reply({ content: 'Player not found.', ephemeral: true });
+            await interaction.reply({ content: 'Player not found.', flags: 1 << 6 });
             return;
         }
         // Update player data
@@ -349,7 +328,8 @@ client.on('interactionCreate', async (interaction) => {
 
         // Update or send the player list message and status message
         await updatePlayerListMessage(interaction, team, 'Player updated!');
-        await interaction.deferUpdate();
+        // Send the edit/add buttons ephemerally
+        await sendEditAndAddButtons(interaction, team);
         return;
     }
 });
@@ -357,68 +337,82 @@ client.on('interactionCreate', async (interaction) => {
 // --- Helper function to update or send the player list message ---
 async function updatePlayerListMessage(interaction, team, statusText = '') {
     const userId = interaction.user.id;
-    const channel = interaction.channel;
 
     let playerList = '';
     const components = [];
+    let sixthPlayer = null;
+    let sixthComponents = [];
+
     if (team.players.length > 0) {
         team.players.forEach((player, idx) => {
-            playerList += `**Player ${idx + 1}:** PUBG Name: ${player.pubgName}, PUBG UID: ${player.pubgUid}, Discord ID: ${player.playerDiscordId}\n`;
-            components.push(
-                new ActionRowBuilder().addComponents(
-                    new ButtonBuilder()
-                        .setCustomId(`edit_player_${idx}`)
-                        .setLabel(`Edit Player ${idx + 1}`)
-                        .setStyle(ButtonStyle.Primary),
-                    new ButtonBuilder()
-                        .setCustomId(`remove_player_${idx}`)
-                        .setLabel(`Remove Player ${idx + 1}`)
-                        .setStyle(ButtonStyle.Danger)
-                )
-            );
+            if (idx < 5) {
+                playerList += `**Player ${idx + 1}:** PUBG Name: ${player.pubgName}, PUBG UID: ${player.pubgUid}, Discord ID: ${player.playerDiscordId}\n`;
+                components.push(
+                    new ActionRowBuilder().addComponents(
+                        new ButtonBuilder()
+                            .setCustomId(`edit_player_${idx}`)
+                            .setLabel(`Edit Player ${idx + 1}`)
+                            .setStyle(ButtonStyle.Primary),
+                        new ButtonBuilder()
+                            .setCustomId(`remove_player_${idx}`)
+                            .setLabel(`Remove Player ${idx + 1}`)
+                            .setStyle(ButtonStyle.Danger)
+                    )
+                );
+            } else if (idx === 5) {
+                sixthPlayer = player;
+                sixthComponents = [
+                    new ActionRowBuilder().addComponents(
+                        new ButtonBuilder()
+                            .setCustomId(`edit_player_${idx}`)
+                            .setLabel(`Edit Player ${idx + 1}`)
+                            .setStyle(ButtonStyle.Primary),
+                        new ButtonBuilder()
+                            .setCustomId(`remove_player_${idx}`)
+                            .setLabel(`Remove Player ${idx + 1}`)
+                            .setStyle(ButtonStyle.Danger)
+                    )
+                ];
+            }
         });
     } else {
         playerList = 'No players added yet.';
     }
 
-    // Try to edit the previous player list message if it exists
-    if (userPlayerListMessages[userId]) {
-        try {
-            const msg = await channel.messages.fetch(userPlayerListMessages[userId]);
-            await msg.edit({
-                content: `**Your Team Players:**\n${playerList}\nTotal players: ${team.players.length}/6`,
-                components
-            });
-        } catch (e) {
-            // Message might have been deleted, fall through to send a new one
-            const sentMsg = await channel.send({
-                content: `**Your Team Players:**\n${playerList}\nTotal players: ${team.players.length}/6`,
-                components
-            });
-            userPlayerListMessages[userId] = sentMsg.id;
-        }
-    } else {
-        const sentMsg = await channel.send({
-            content: `**Your Team Players:**\n${playerList}\nTotal players: ${team.players.length}/6`,
-            components
-        });
-        userPlayerListMessages[userId] = sentMsg.id;
+    const teamHeader = team.teamName && team.teamTag
+        ? `**${team.teamName} (${team.teamTag})**\n`
+        : '';
+
+    let content = `${teamHeader}**Your Team Players:**\n${playerList}\nTotal players: ${team.players.length}/6`;
+    if (statusText) {
+        content = `${statusText}\n\n${content}`;
     }
 
-    // Handle the status message (edit or send)
-    if (statusText) {
-        if (userPlayerStatusMessages[userId]) {
-            try {
-                const statusMsg = await channel.messages.fetch(userPlayerStatusMessages[userId]);
-                await statusMsg.edit({ content: statusText });
-            } catch (e) {
-                const sentStatus = await channel.send({ content: statusText });
-                userPlayerStatusMessages[userId] = sentStatus.id;
-            }
-        } else {
-            const sentStatus = await channel.send({ content: statusText });
-            userPlayerStatusMessages[userId] = sentStatus.id;
-        }
+    // First message: up to 5 players
+    if (interaction.replied || interaction.deferred) {
+        await interaction.editReply({
+            content,
+            components,
+            flags: 1 << 6 // Ephemeral
+        });
+    } else {
+        await interaction.reply({
+            content,
+            components,
+            flags: 1 << 6 // Ephemeral
+        });
+    }
+
+    // Second message: 6th player (if exists)
+    if (sixthPlayer) {
+        const sixthContent = `**Player 6:** PUBG Name: ${sixthPlayer.pubgName}, PUBG UID: ${sixthPlayer.pubgUid}, Discord ID: ${sixthPlayer.playerDiscordId}`;
+        // Try to find a previous followUp from this interaction for the 6th player
+        // (We can't edit a previous followUp easily, so just send a new ephemeral followUp each time)
+        await interaction.followUp({
+            content: sixthContent,
+            components: sixthComponents,
+            flags: 1 << 6 // Ephemeral
+        });
     }
 }
 
@@ -427,7 +421,7 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.isChatInputCommand() && interaction.commandName === 'myid') {
         await interaction.reply({
             content: `Your Discord ID is: ${interaction.user.id}`,
-            ephemeral: true
+            flags: 1 << 6 // Ephemeral
         });
         return;
     }
